@@ -17,7 +17,7 @@ export async function GET() {
     const data = await response.json()
     return Response.json({ token: data.token })
   } catch (error) {
-    console.error("[v0] Token creation error:", error)
+    console.error("Token creation error:", error)
     return Response.json(
       { error: "Failed to create token" },
       { status: 500 }
