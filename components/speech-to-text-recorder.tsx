@@ -2,13 +2,26 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useScribe } from '@elevenlabs/react'
-import { Mic, Square, Copy, Trash2, Radio } from 'lucide-react'
+import { Mic, Square, Copy, Trash2, Radio, Volume2, VolumeX } from 'lucide-react'
 
 interface TranscriptSegment {
   id: string
   text: string
   timestamp: number
 }
+
+interface Voice {
+  voice_id: string
+  name: string
+  description: string
+}
+
+// Popular ElevenLabs voices with different accents
+const VOICES: Voice[] = [
+  { voice_id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', description: 'American Male (Warm, Conversational)' },
+  { voice_id: 'N2lVS1w4EtoT3dr4eOWO', name: 'Callum', description: 'British Male (Smooth, Professional)' },
+  { voice_id: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie', description: 'Australian Male (Friendly, Casual)' },
+]
 
 export function SpeechToTextRecorder() {
   const [transcriptHistory, setTranscriptHistory] = useState<TranscriptSegment[]>([])
@@ -18,6 +31,16 @@ export function SpeechToTextRecorder() {
   const [token, setToken] = useState<string | null>(null)
   const [isLoadingToken, setIsLoadingToken] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // TTS-related state
+  const [ttsEnabled, setTtsEnabled] = useState(true)
+  const [selectedVoice, setSelectedVoice] = useState<string>('JBFqnCBsd6RMkjVDRZzb') // Default voice (George)
+  const [isSpeaking, setIsSpeaking] = useState(false)
+  const [isVoiceDropdownOpen, setIsVoiceDropdownOpen] = useState(false)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const audioQueueRef = useRef<string[]>([])
+  const isPlayingRef = useRef(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
 
   const scribe = useScribe({
     modelId: 'scribe_v2_realtime',
@@ -78,6 +101,102 @@ export function SpeechToTextRecorder() {
     }
   }, [accumulatedText, scribe.partialTranscript])
 
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsVoiceDropdownOpen(false)
+      }
+    }
+
+    if (isVoiceDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [isVoiceDropdownOpen])
+
+  // TTS playback function
+  const playTextToSpeech = async (text: string) => {
+    if (!ttsEnabled || !text.trim()) {
+      console.log('TTS skipped - enabled:', ttsEnabled, 'text:', text.trim())
+      return
+    }
+
+    try {
+      console.log('TTS: Starting playback for text:', text)
+      setIsSpeaking(true)
+
+      const response = await fetch('/api/text-to-speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text.trim(),
+          voiceId: selectedVoice,
+          modelId: 'eleven_flash_v2_5',
+        }),
+      })
+
+      console.log('TTS: Response status:', response.status)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('TTS: API error:', errorText)
+        throw new Error(`TTS request failed: ${response.status} - ${errorText}`)
+      }
+
+      const audioBlob = await response.blob()
+      console.log('TTS: Audio blob received, size:', audioBlob.size)
+
+      const audioUrl = URL.createObjectURL(audioBlob)
+
+      // Create or reuse audio element
+      if (!audioRef.current) {
+        audioRef.current = new Audio()
+        console.log('TTS: Created new audio element')
+      }
+
+      audioRef.current.src = audioUrl
+      audioRef.current.volume = 1.0 // Ensure volume is at maximum
+      audioRef.current.muted = false // Ensure not muted
+
+      audioRef.current.onerror = (e) => {
+        console.error('TTS: Audio element error:', e)
+        setError('Audio playback failed')
+        setIsSpeaking(false)
+      }
+
+      audioRef.current.onended = () => {
+        console.log('TTS: Playback ended')
+        setIsSpeaking(false)
+        URL.revokeObjectURL(audioUrl)
+      }
+
+      audioRef.current.onplay = () => {
+        console.log('TTS: Audio onplay event fired')
+      }
+
+      audioRef.current.onloadeddata = () => {
+        console.log('TTS: Audio loaded, duration:', audioRef.current?.duration)
+      }
+
+      console.log('TTS: Starting audio playback')
+      try {
+        await audioRef.current.play()
+        console.log('TTS: Audio playing, volume:', audioRef.current.volume, 'muted:', audioRef.current.muted)
+      } catch (playError) {
+        console.error('TTS: Play failed:', playError)
+        throw playError
+      }
+    } catch (err) {
+      console.error('TTS playback error:', err)
+      setError('TTS Error: ' + (err instanceof Error ? err.message : 'Unknown error'))
+      setIsSpeaking(false)
+    }
+  }
+
   const handleStart = async () => {
     try {
       setError(null)
@@ -113,7 +232,41 @@ export function SpeechToTextRecorder() {
 
   const handleStop = async () => {
     try {
+      console.log('handleStop called')
+      console.log('TTS enabled:', ttsEnabled)
+      console.log('Accumulated text:', accumulatedText)
+      console.log('Partial transcript:', scribe.partialTranscript)
+      console.log('Transcript history length:', transcriptHistory.length)
+
+      // Capture partial transcript before disconnecting
+      const partialText = scribe.partialTranscript || ''
+
       await scribe.disconnect()
+
+      // Small delay to ensure state is updated
+      setTimeout(() => {
+        // Get text from all sources
+        const textFromState = accumulatedText.trim()
+        const textFromHistory = transcriptHistory.map((s) => s.text).join(' ').trim()
+        const textFromPartial = partialText.trim()
+
+        // Combine accumulated + partial (partial might not be in accumulated yet)
+        const fullText = (textFromState + ' ' + textFromPartial).trim()
+        const textToSpeak = fullText || textFromHistory
+
+        console.log('Text from state:', textFromState)
+        console.log('Text from history:', textFromHistory)
+        console.log('Text from partial:', textFromPartial)
+        console.log('Final text to speak:', textToSpeak)
+
+        // Play TTS of the full transcript after stopping
+        if (ttsEnabled && textToSpeak) {
+          console.log('Recording stopped, playing TTS of full transcript')
+          playTextToSpeech(textToSpeak)
+        } else {
+          console.log('TTS not triggered. Enabled:', ttsEnabled, 'Has text:', !!textToSpeak)
+        }
+      }, 500)
     } catch (err) {
       console.error('Error stopping:', err)
     }
@@ -132,62 +285,92 @@ export function SpeechToTextRecorder() {
   }
 
   return (
-    <div className="w-full max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
-      {/* Header Section */}
-      <div className="mb-8 sm:mb-12 text-center">
-        <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-black tracking-tighter mb-3 sm:mb-4 text-foreground">
-          VOICE<span className="text-primary">SCRIBER</span>
-        </h1>
-      </div>
+    <div className="w-full min-h-screen">
+      <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
+        {/* Header Section */}
+        <div className="mb-8 sm:mb-12 text-center">
+          <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-black tracking-tighter text-foreground">
+            VOICE<span className="text-primary">SCRIBER</span>
+          </h1>
+        </div>
 
-      {/* Main Recording Button */}
-      <div className="relative flex items-center justify-center py-8 sm:py-12 mb-8">
-        {/* Ripple effect when recording */}
-        {scribe.isConnected && (
-          <>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="w-48 h-48 sm:w-64 sm:h-64 rounded-full border-4 border-secondary animate-ripple" />
-            </div>
-            <div className="absolute inset-0 flex items-center justify-center" style={{ animationDelay: '0.5s' }}>
-              <div className="w-48 h-48 sm:w-64 sm:h-64 rounded-full border-4 border-primary animate-ripple" />
-            </div>
-          </>
-        )}
+        {/* Voice Selector - Fixed top-right on desktop */}
+        {ttsEnabled && (
+          <div ref={dropdownRef} className="mb-6 sm:mb-0 sm:fixed sm:top-6 sm:right-6 sm:z-50">
+            <button
+              onClick={() => setIsVoiceDropdownOpen(!isVoiceDropdownOpen)}
+              className="px-4 py-2 rounded-lg font-black text-xs sm:text-sm border-2 border-foreground bg-card text-foreground hover:bg-muted cursor-pointer transition-all duration-200 uppercase tracking-wider shadow-lg flex items-center gap-2 whitespace-nowrap"
+            >
+              <span>{VOICES.find((v) => v.voice_id === selectedVoice)?.name}</span>
+              <span className={`text-[10px] transition-transform duration-200 ${isVoiceDropdownOpen ? 'rotate-180' : ''}`}>▼</span>
+            </button>
 
-        {/* Main Button */}
-        <button
-          onClick={scribe.isConnected ? handleStop : handleStart}
-          disabled={scribe.isConnecting || isLoadingToken}
-          className={`
-            relative w-44 h-44 sm:w-52 sm:h-52 md:w-56 md:h-56 rounded-full transition-all duration-300
-            flex items-center justify-center group shadow-xl
-            ${scribe.isConnected
-              ? 'bg-secondary hover:shadow-2xl animate-pulse-shadow'
-              : 'bg-primary hover:scale-105 hover:shadow-2xl'}
-            ${scribe.isConnecting || isLoadingToken ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
-          `}
-        >
-          {/* Icon */}
-          <div className="flex flex-col items-center gap-3 sm:gap-4">
-            {scribe.isConnected ? (
-              <>
-                <Square className="w-16 h-16 sm:w-20 sm:h-20 text-white fill-white" />
-                <span className="text-sm sm:text-base font-black text-white tracking-widest">STOP</span>
-              </>
-            ) : (
-              <>
-                <Mic className="w-16 h-16 sm:w-20 sm:h-20 text-white" />
-                <span className="text-sm sm:text-base font-black text-white tracking-widest">
-                  {isLoadingToken ? 'LOADING...' : scribe.isConnecting ? 'CONNECTING' : 'RECORD'}
-                </span>
-              </>
+            {/* Dropdown Menu */}
+            {isVoiceDropdownOpen && (
+              <div className="absolute left-1/2 -translate-x-1/2 sm:left-auto sm:translate-x-0 sm:right-0 top-full mt-3 w-80 max-w-[calc(100vw-2rem)] bg-card border-4 border-foreground rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-200 max-h-[60vh] overflow-y-auto">
+                {VOICES.map((voice) => (
+                  <button
+                    key={voice.voice_id}
+                    onClick={() => {
+                      setSelectedVoice(voice.voice_id)
+                      setIsVoiceDropdownOpen(false)
+                    }}
+                    className={`
+                      w-full px-5 py-4 text-left font-bold transition-all duration-150 border-b-2 border-foreground/20 last:border-b-0
+                      ${selectedVoice === voice.voice_id
+                        ? 'bg-primary text-white'
+                        : 'bg-card text-foreground hover:bg-muted'}
+                    `}
+                  >
+                    <div className="font-black uppercase tracking-wider text-sm sm:text-base">{voice.name}</div>
+                    <div className="text-xs sm:text-sm mt-1 opacity-80 normal-case tracking-normal font-medium">
+                      {voice.description}
+                    </div>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
-        </button>
-      </div>
+        )}
 
-      {/* Live Transcript Display */}
-      <div className="bg-card border-4 border-foreground rounded-2xl p-4 sm:p-6 md:p-8 shadow-lg mb-6">
+      {/* Recording Section, Live Transcript, and Speaker Button */}
+      <div className="grid grid-cols-1 lg:grid-cols-[auto_1fr_auto] gap-6 mb-6">
+        {/* Main Recording Button */}
+        <div className="relative flex items-center justify-center py-8 lg:py-12 lg:order-1">
+          {/* Main Button */}
+          <button
+            onClick={scribe.isConnected ? handleStop : handleStart}
+            disabled={scribe.isConnecting || isLoadingToken}
+            className={`
+              relative w-36 h-36 sm:w-44 sm:h-44 rounded-full transition-all duration-300
+              flex items-center justify-center group shadow-xl
+              ${scribe.isConnected
+                ? 'bg-secondary hover:shadow-2xl animate-pulse-shadow'
+                : 'bg-primary hover:scale-105 hover:shadow-2xl'}
+              ${scribe.isConnecting || isLoadingToken ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+            `}
+          >
+            {/* Icon */}
+            <div className="flex flex-col items-center gap-3">
+              {scribe.isConnected ? (
+                <>
+                  <Square className="w-12 h-12 sm:w-16 sm:h-16 text-white fill-white" />
+                  <span className="text-xs sm:text-sm font-black text-white tracking-widest">STOP</span>
+                </>
+              ) : (
+                <>
+                  <Mic className="w-12 h-12 sm:w-16 sm:h-16 text-white" />
+                  <span className="text-xs sm:text-sm font-black text-white tracking-widest">
+                    {isLoadingToken ? 'LOADING...' : scribe.isConnecting ? 'CONNECTING' : 'RECORD'}
+                  </span>
+                </>
+              )}
+            </div>
+          </button>
+        </div>
+
+        {/* Live Transcript Display */}
+        <div className="bg-card border-4 border-foreground rounded-2xl p-4 sm:p-6 md:p-8 shadow-lg flex flex-col h-full lg:min-h-[500px] lg:order-2">
         <div className="flex items-center gap-3 mb-4 sm:mb-6">
           <div className={`w-3 h-3 rounded-full ${scribe.isConnected ? 'bg-secondary animate-pulse' : 'bg-muted-foreground'}`} />
           <span className="text-xs sm:text-sm font-black tracking-wider text-foreground uppercase">
@@ -197,7 +380,7 @@ export function SpeechToTextRecorder() {
 
         <div
           ref={scrollRef}
-          className="min-h-32 sm:min-h-40 max-h-[400px] sm:max-h-[500px] overflow-y-auto font-mono text-base sm:text-lg leading-relaxed custom-scrollbar"
+          className="flex-1 min-h-64 sm:min-h-80 lg:min-h-0 overflow-y-auto font-mono text-base sm:text-lg leading-relaxed custom-scrollbar"
         >
           {(scribe.isConnected || accumulatedText.trim()) ? (
             <p className="text-foreground font-medium whitespace-pre-wrap">
@@ -209,6 +392,44 @@ export function SpeechToTextRecorder() {
           ) : (
             <p className="text-muted-foreground italic text-sm sm:text-base">Awaiting audio input...</p>
           )}
+        </div>
+        </div>
+
+        {/* Speaker/TTS Button */}
+        <div className="relative flex items-center justify-center py-8 lg:py-12 lg:order-3">
+          {/* Speaker Button */}
+          <button
+            onClick={() => setTtsEnabled(!ttsEnabled)}
+            disabled={isSpeaking}
+            className={`
+              relative w-36 h-36 sm:w-44 sm:h-44 rounded-full transition-all duration-300
+              flex items-center justify-center group shadow-xl
+              ${ttsEnabled
+                ? 'bg-primary hover:shadow-2xl'
+                : 'bg-muted-foreground/30 hover:bg-muted-foreground/50'}
+              ${isSpeaking ? 'opacity-50 cursor-not-allowed animate-pulse' : 'cursor-pointer hover:scale-105'}
+            `}
+          >
+            {/* Icon */}
+            <div className="flex flex-col items-center gap-3">
+              {isSpeaking ? (
+                <>
+                  <Volume2 className="w-12 h-12 sm:w-16 sm:h-16 text-white animate-pulse" />
+                  <span className="text-xs sm:text-sm font-black text-white tracking-widest">PLAYING</span>
+                </>
+              ) : ttsEnabled ? (
+                <>
+                  <Volume2 className="w-12 h-12 sm:w-16 sm:h-16 text-white" />
+                  <span className="text-xs sm:text-sm font-black text-white tracking-widest">TTS ON</span>
+                </>
+              ) : (
+                <>
+                  <VolumeX className="w-12 h-12 sm:w-16 sm:h-16 text-white" />
+                  <span className="text-xs sm:text-sm font-black text-white tracking-widest">TTS OFF</span>
+                </>
+              )}
+            </div>
+          </button>
         </div>
       </div>
 
@@ -277,6 +498,7 @@ export function SpeechToTextRecorder() {
           background: oklch(0.7 0 0);
         }
       `}</style>
+      </div>
     </div>
   )
 }
