@@ -30,17 +30,21 @@ export function SpeechToTextRecorder() {
   const [accumulatedText, setAccumulatedText] = useState<string>('')
   const [token, setToken] = useState<string | null>(null)
   const [isLoadingToken, setIsLoadingToken] = useState(true)
+  const [apiKey, setApiKey] = useState<string>('')
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // TTS-related state
   const [ttsEnabled, setTtsEnabled] = useState(true)
   const [selectedVoice, setSelectedVoice] = useState<string>('JBFqnCBsd6RMkjVDRZzb') // Default voice (George)
   const [isSpeaking, setIsSpeaking] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
   const [isVoiceDropdownOpen, setIsVoiceDropdownOpen] = useState(false)
+  const [isApiKeyDropdownOpen, setIsApiKeyDropdownOpen] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioQueueRef = useRef<string[]>([])
   const isPlayingRef = useRef(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const apiKeyDropdownRef = useRef<HTMLDivElement>(null)
 
   const scribe = useScribe({
     modelId: 'scribe_v2_realtime',
@@ -67,33 +71,42 @@ export function SpeechToTextRecorder() {
     },
   })
 
-  // Fetch token on component mount
+  // Fetch token when API key changes
   useEffect(() => {
     const fetchToken = async () => {
       try {
+        // Clear existing token to force refetch with new API key
+        setToken(null)
         setIsLoadingToken(true)
         setError(null)
-        console.log('Fetching token on page load...')
 
-        const tokenResponse = await fetch('/api/scribe-token')
+        const keyToUse = apiKey.trim() || undefined
+        console.log('Fetching token...', keyToUse ? 'with user API key' : 'with env API key')
+
+        const tokenResponse = await fetch('/api/scribe-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: keyToUse }),
+        })
         if (!tokenResponse.ok) {
-          throw new Error('Failed to get authentication token')
+          const errorData = await tokenResponse.json()
+          throw new Error(errorData.error || 'Failed to get authentication token')
         }
 
         const { token: fetchedToken } = await tokenResponse.json()
         setToken(fetchedToken)
-        console.log('Token fetched successfully')
+        console.log('Token fetched successfully with', keyToUse ? 'user API key' : 'env API key')
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Failed to fetch token'
         console.error('Error:', errorMessage)
-        setError(errorMessage + ' - Please check your ELEVENLABS_API_KEY in .env.local')
+        setError(errorMessage)
       } finally {
         setIsLoadingToken(false)
       }
     }
 
     fetchToken()
-  }, [])
+  }, [apiKey])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -101,7 +114,7 @@ export function SpeechToTextRecorder() {
     }
   }, [accumulatedText, scribe.partialTranscript])
 
-  // Close dropdown when clicking outside
+  // Close voice dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -118,17 +131,37 @@ export function SpeechToTextRecorder() {
     }
   }, [isVoiceDropdownOpen])
 
+  // Close API key dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (apiKeyDropdownRef.current && !apiKeyDropdownRef.current.contains(event.target as Node)) {
+        setIsApiKeyDropdownOpen(false)
+      }
+    }
+
+    if (isApiKeyDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [isApiKeyDropdownOpen])
+
   // TTS playback function
   const playTextToSpeech = async (text: string) => {
     if (!ttsEnabled || !text.trim()) {
       console.log('TTS skipped - enabled:', ttsEnabled, 'text:', text.trim())
+      setIsProcessing(false)
       return
     }
 
     try {
       console.log('TTS: Starting playback for text:', text)
+      setIsProcessing(false)
       setIsSpeaking(true)
 
+      const keyToUse = apiKey.trim() || undefined
       const response = await fetch('/api/text-to-speech', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -136,6 +169,7 @@ export function SpeechToTextRecorder() {
           text: text.trim(),
           voiceId: selectedVoice,
           modelId: 'eleven_flash_v2_5',
+          apiKey: keyToUse,
         }),
       })
 
@@ -193,6 +227,7 @@ export function SpeechToTextRecorder() {
     } catch (err) {
       console.error('TTS playback error:', err)
       setError('TTS Error: ' + (err instanceof Error ? err.message : 'Unknown error'))
+      setIsProcessing(false)
       setIsSpeaking(false)
     }
   }
@@ -205,9 +240,15 @@ export function SpeechToTextRecorder() {
       let currentToken = token
       if (!currentToken) {
         console.log('No token available, fetching new token...')
-        const tokenResponse = await fetch('/api/scribe-token')
+        const keyToUse = apiKey.trim() || undefined
+        const tokenResponse = await fetch('/api/scribe-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: keyToUse }),
+        })
         if (!tokenResponse.ok) {
-          throw new Error('Failed to get authentication token')
+          const errorData = await tokenResponse.json()
+          throw new Error(errorData.error || 'Failed to get authentication token')
         }
         const { token: fetchedToken } = await tokenResponse.json()
         currentToken = fetchedToken
@@ -242,6 +283,11 @@ export function SpeechToTextRecorder() {
       const partialText = scribe.partialTranscript || ''
 
       await scribe.disconnect()
+
+      // Set processing state if TTS is enabled
+      if (ttsEnabled) {
+        setIsProcessing(true)
+      }
 
       // Small delay to ensure state is updated
       setTimeout(() => {
@@ -284,54 +330,54 @@ export function SpeechToTextRecorder() {
     setAccumulatedText('')
   }
 
+  const handleApiKeyPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    // Auto-collapse after paste
+    setTimeout(() => {
+      setIsApiKeyDropdownOpen(false)
+    }, 1000)
+  }
+
   return (
     <div className="w-full min-h-screen">
       <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
-        {/* Header Section */}
-        <div className="mb-8 sm:mb-12 text-center">
-          <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-black tracking-tighter text-foreground">
-            VOICE<span className="text-primary">SCRIBER</span>
-          </h1>
+        {/* Header Section with API Key Input */}
+        <div className="mb-8 sm:mb-12">
+          {/* Title */}
+          <div className="text-center mb-4">
+            <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-black tracking-tighter text-foreground">
+              VOICE<span className="text-primary">SCRIBER</span>
+            </h1>
+          </div>
+
+          {/* API Key Button & Dropdown */}
+          <div className="max-w-2xl mx-auto" ref={apiKeyDropdownRef}>
+            <div className="text-center">
+              <button
+                onClick={() => setIsApiKeyDropdownOpen(!isApiKeyDropdownOpen)}
+                className="px-6 py-2 rounded-lg border-2 border-foreground bg-card text-foreground hover:bg-muted transition-all duration-200 text-sm font-bold"
+              >
+                {apiKey ? '✓ API Key Set' : 'Put ElevenLabs API key here'}
+              </button>
+
+              {/* Dropdown Input */}
+              {isApiKeyDropdownOpen && (
+                <div className="mt-3 animate-in fade-in slide-in-from-top-2 duration-200">
+                  <input
+                    id="api-key"
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    onPaste={handleApiKeyPaste}
+                    placeholder="Paste your ElevenLabs API key..."
+                    className="w-full px-4 py-3 rounded-lg border-4 border-foreground bg-background text-foreground font-mono text-sm focus:outline-none focus:ring-2 focus:ring-primary transition-all shadow-lg"
+                    autoFocus
+                  />
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
-        {/* Voice Selector - Fixed top-right on desktop */}
-        {ttsEnabled && (
-          <div ref={dropdownRef} className="mb-6 sm:mb-0 sm:fixed sm:top-6 sm:right-6 sm:z-50">
-            <button
-              onClick={() => setIsVoiceDropdownOpen(!isVoiceDropdownOpen)}
-              className="px-4 py-2 rounded-lg font-black text-xs sm:text-sm border-2 border-foreground bg-card text-foreground hover:bg-muted cursor-pointer transition-all duration-200 uppercase tracking-wider shadow-lg flex items-center gap-2 whitespace-nowrap"
-            >
-              <span>{VOICES.find((v) => v.voice_id === selectedVoice)?.name}</span>
-              <span className={`text-[10px] transition-transform duration-200 ${isVoiceDropdownOpen ? 'rotate-180' : ''}`}>▼</span>
-            </button>
-
-            {/* Dropdown Menu */}
-            {isVoiceDropdownOpen && (
-              <div className="absolute left-1/2 -translate-x-1/2 sm:left-auto sm:translate-x-0 sm:right-0 top-full mt-3 w-80 max-w-[calc(100vw-2rem)] bg-card border-4 border-foreground rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-200 max-h-[60vh] overflow-y-auto">
-                {VOICES.map((voice) => (
-                  <button
-                    key={voice.voice_id}
-                    onClick={() => {
-                      setSelectedVoice(voice.voice_id)
-                      setIsVoiceDropdownOpen(false)
-                    }}
-                    className={`
-                      w-full px-5 py-4 text-left font-bold transition-all duration-150 border-b-2 border-foreground/20 last:border-b-0
-                      ${selectedVoice === voice.voice_id
-                        ? 'bg-primary text-white'
-                        : 'bg-card text-foreground hover:bg-muted'}
-                    `}
-                  >
-                    <div className="font-black uppercase tracking-wider text-sm sm:text-base">{voice.name}</div>
-                    <div className="text-xs sm:text-sm mt-1 opacity-80 normal-case tracking-normal font-medium">
-                      {voice.description}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
 
       {/* Recording Section, Live Transcript, and Speaker Button */}
       <div className="grid grid-cols-1 lg:grid-cols-[auto_1fr_auto] gap-6 mb-6">
@@ -372,9 +418,9 @@ export function SpeechToTextRecorder() {
         {/* Live Transcript Display */}
         <div className="bg-card border-4 border-foreground rounded-2xl p-4 sm:p-6 md:p-8 shadow-lg flex flex-col h-full lg:min-h-[500px] lg:order-2">
         <div className="flex items-center gap-3 mb-4 sm:mb-6">
-          <div className={`w-3 h-3 rounded-full ${scribe.isConnected ? 'bg-secondary animate-pulse' : 'bg-muted-foreground'}`} />
+          <div className={`w-3 h-3 rounded-full ${scribe.isConnected ? 'bg-secondary animate-pulse' : isProcessing ? 'bg-primary animate-pulse' : isSpeaking ? 'bg-primary animate-pulse' : 'bg-muted-foreground'}`} />
           <span className="text-xs sm:text-sm font-black tracking-wider text-foreground uppercase">
-            {scribe.isConnected ? 'Recording' : 'Ready'}
+            {scribe.isConnected ? 'Recording' : isProcessing ? 'Processing' : isSpeaking ? 'Speaking' : 'Ready'}
           </span>
         </div>
 
@@ -396,7 +442,7 @@ export function SpeechToTextRecorder() {
         </div>
 
         {/* Speaker/TTS Button */}
-        <div className="relative flex items-center justify-center py-8 lg:py-12 lg:order-3">
+        <div className="relative flex flex-col items-center justify-center py-8 lg:py-12 lg:order-3 gap-6">
           {/* Speaker Button */}
           <button
             onClick={() => setTtsEnabled(!ttsEnabled)}
@@ -430,16 +476,55 @@ export function SpeechToTextRecorder() {
               )}
             </div>
           </button>
+
+          {/* Voice Selector */}
+          {ttsEnabled && (
+            <div ref={dropdownRef} className="relative">
+              <button
+                onClick={() => setIsVoiceDropdownOpen(!isVoiceDropdownOpen)}
+                className="px-4 py-2 rounded-lg font-black text-xs sm:text-sm border-2 border-foreground bg-card text-foreground hover:bg-muted cursor-pointer transition-all duration-200 uppercase tracking-wider shadow-lg flex items-center gap-2 whitespace-nowrap"
+              >
+                <span>{VOICES.find((v) => v.voice_id === selectedVoice)?.name}</span>
+                <span className={`text-[10px] transition-transform duration-200 ${isVoiceDropdownOpen ? 'rotate-180' : ''}`}>▼</span>
+              </button>
+
+              {/* Dropdown Menu */}
+              {isVoiceDropdownOpen && (
+                <div className="absolute left-1/2 -translate-x-1/2 top-full mt-3 w-80 max-w-[calc(100vw-2rem)] bg-card border-4 border-foreground rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-200 max-h-[60vh] overflow-y-auto">
+                  {VOICES.map((voice) => (
+                    <button
+                      key={voice.voice_id}
+                      onClick={() => {
+                        setSelectedVoice(voice.voice_id)
+                        setIsVoiceDropdownOpen(false)
+                      }}
+                      className={`
+                        w-full px-5 py-4 text-left font-bold transition-all duration-150 border-b-2 border-foreground/20 last:border-b-0
+                        ${selectedVoice === voice.voice_id
+                          ? 'bg-primary text-white'
+                          : 'bg-card text-foreground hover:bg-muted'}
+                      `}
+                    >
+                      <div className="font-black uppercase tracking-wider text-sm sm:text-base">{voice.name}</div>
+                      <div className="text-xs sm:text-sm mt-1 opacity-80 normal-case tracking-normal font-medium">
+                        {voice.description}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       {/* Action Buttons */}
-      <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-6">
+      <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-6 justify-center">
         <button
           onClick={copyToClipboard}
           disabled={!accumulatedText.trim()}
           className={`
-            flex-1 px-5 py-3 sm:py-3.5 rounded-lg font-bold text-sm sm:text-base transition-all duration-200 border-2
+            px-5 py-3 sm:py-3.5 rounded-lg font-bold text-sm sm:text-base transition-all duration-200 border-2
             ${!accumulatedText.trim()
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed'
               : copiedFeedback
@@ -456,7 +541,7 @@ export function SpeechToTextRecorder() {
           onClick={clearHistory}
           disabled={!accumulatedText.trim()}
           className={`
-            flex-1 px-5 py-3 sm:py-3.5 rounded-lg font-bold text-sm sm:text-base transition-all duration-200 border-2
+            px-5 py-3 sm:py-3.5 rounded-lg font-bold text-sm sm:text-base transition-all duration-200 border-2
             ${!accumulatedText.trim()
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed'
               : 'bg-card border-destructive text-destructive hover:bg-destructive hover:text-white'}

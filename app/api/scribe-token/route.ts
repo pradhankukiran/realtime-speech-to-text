@@ -1,11 +1,25 @@
-export async function GET() {
+import { NextRequest } from 'next/server'
+
+export async function POST(request: NextRequest) {
   try {
+    const { apiKey: userApiKey } = await request.json()
+
+    // Use user-provided API key if available, otherwise fall back to env
+    const apiKey = userApiKey || process.env.ELEVENLABS_API_KEY
+
+    if (!apiKey) {
+      return Response.json(
+        { error: "API key is required. Please provide an API key or configure ELEVENLABS_API_KEY in environment variables." },
+        { status: 400 }
+      )
+    }
+
     const response = await fetch(
       "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
       {
         method: "POST",
         headers: {
-          "xi-api-key": process.env.ELEVENLABS_API_KEY!,
+          "xi-api-key": apiKey,
         },
       }
     )

@@ -3,15 +3,17 @@ import { NextRequest } from 'next/server'
 
 export async function POST(request: NextRequest) {
   try {
-    const { text, voiceId, modelId } = await request.json()
+    const { text, voiceId, modelId, apiKey: userApiKey } = await request.json()
 
     if (!text) {
       return new Response('Text is required', { status: 400 })
     }
 
-    const apiKey = process.env.ELEVENLABS_API_KEY
+    // Use user-provided API key if available, otherwise fall back to env
+    const apiKey = userApiKey || process.env.ELEVENLABS_API_KEY
+
     if (!apiKey) {
-      return new Response('ELEVENLABS_API_KEY not configured', { status: 500 })
+      return new Response('API key is required. Please provide an API key or configure ELEVENLABS_API_KEY in environment variables.', { status: 400 })
     }
 
     const client = new ElevenLabsClient({ apiKey })
